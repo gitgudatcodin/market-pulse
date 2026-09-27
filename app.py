@@ -73,11 +73,42 @@ YF_TICKERS = ["^GSPC", "^VIX", "^TNX", "DX-Y.NYB", "GC=F", "HG=F", "CL=F",
 
 
 # ============================================================ data layer
+def _dbnomics_fred(sid, timeout=25):
+    """Fallback: DBnomics mirrors the full FRED database (no key, generous
+    rate limits). Handles both documented response shapes."""
+    import json as _json
+    url = f"https://api.db.nomics.world/v22/series/FRED/series/{sid}?observations=1"
+    try:
+        req = urllib.request.Request(url, headers=UA)
+        payload = _json.loads(
+            urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8"))
+        series = payload.get("series", {})
+        if isinstance(series, list):
+            series = series[0] if series else {}
+        periods, values = None, None
+        if isinstance(series.get("period"), list) and isinstance(series.get("value"), list):
+            periods, values = series["period"], series["value"]
+        elif isinstance(series.get("observations"), list):
+            obs = series["observations"]
+            periods = [o.get("period") for o in obs]
+            values = [o.get("value") for o in obs]
+        if not periods:
+            return pd.Series(dtype=float)
+        idx = pd.to_datetime(periods)
+        vals = pd.to_numeric(
+            pd.Series(list(values)).replace("NA", np.nan), errors="coerce")
+        s = pd.Series(vals.to_numpy(), index=idx).dropna().sort_index()
+        return s[~s.index.duplicated(keep="last")]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
 def _fred_one(sid, tries=2):
     if _STUB_MODE == "fail":
         return pd.Series(dtype=float)
     if _STUB_MODE:
         return _stub_series(sid)
+    # 1) FRED direct CSV
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
     for a in range(tries):
         try:
@@ -86,10 +117,13 @@ def _fred_one(sid, tries=2):
             df.columns = [c.strip().upper() for c in df.columns]
             df["DATE"] = pd.to_datetime(df["DATE"])
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors="coerce")
-            return df.dropna(subset=["VALUE"]).set_index("DATE")["VALUE"].sort_index()
+            s = df.dropna(subset=["VALUE"]).set_index("DATE")["VALUE"].sort_index()
+            if len(s):
+                return s
         except Exception:
             time.sleep(3 * (a + 1))
-    return pd.Series(dtype=float)
+    # 2) DBnomics FRED mirror (independent host, no key)
+    return _dbnomics_fred(sid)
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -410,7 +444,7 @@ def main():
             "- **Valuation**: CAPE / P/E / P/S / div yield from multpl.com (monthly). "
             "Buffett indicator: official FRED/WDI annual series (lags several years) + a live estimate "
             "scaling the last annual ratio by Wilshire-5000 and nominal GDP moves since — an approximation, labeled as such.\n"
-            "- **Economy**: FRED series as published (subject to revision). YoY transforms labeled.\n"
+            "- **Economy**: FRED series as published (subject to revision). YoY transforms labeled. FRED loads directly, with the DBnomics FRED mirror as automatic fallback.\n"
             "- **Markets**: Yahoo Finance adjusted closes; weekend/holiday gaps forward-filled.\n"
             "- Percentiles rank the current value against each series' full history.\n"
             "- Valuation gauges predict long-horizon returns, not timing. Regime pills are "
