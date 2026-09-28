@@ -27,9 +27,43 @@ streamlit run app.py
 
 ## Notes
 
-- FRED's public CSV endpoint is rate-limited; series are fetched politely
-  (3 workers + backoff) and cached for 6 hours, Yahoo data for 1 hour.
-- Any series that fails to load shows "data unavailable" instead of breaking
-  the app.
-- Valuation gauges predict long-horizon returns, not market timing.
-  Research tooling, not investment advice.
+- **Local database** (`data/market_pulse.db`, SQLite): all series are
+  bulk-downloaded once, then updated incrementally — each series is only
+  refetched when its release calendar says new data can exist (daily series
+  after the last weekday, monthly after the prior month, etc.). A normal
+  launch does zero network requests and renders instantly.
+- FRED's public CSV endpoint throttles aggressively, so every FRED series
+  fails over fast (6s) to the DBnomics FRED mirror (no key). The DB ships
+  pre-seeded with multpl + Yahoo history; FRED series fill on first run.
+  `python seed_db.py` re-seeds from scratch.
+
+## Shared cloud database (Turso) — recommended for Streamlit Cloud
+
+The local `data/market_pulse.db` works, but Streamlit Cloud wipes the
+container filesystem on every sleep/reboot, so runtime updates don't survive.
+Point the app at a free [Turso](https://turso.tech) database (hosted SQLite,
+generous free tier, no credit card) and all viewers share one live,
+persistent DB:
+
+```bash
+# one-time setup (~5 min)
+curl -sSfL https://get.tur.so/install.sh | bash
+turso auth login
+turso db create market-pulse
+turso db show market-pulse --url            # -> TURSO_DATABASE_URL
+turso db tokens create market-pulse         # -> TURSO_AUTH_TOKEN
+
+# seed it from your machine (FRED series fill on first app run)
+export TURSO_DATABASE_URL="libsql://..." TURSO_AUTH_TOKEN="..."
+python seed_db.py
+```
+
+Then in Streamlit Cloud: app → Settings → Secrets, add
+
+```toml
+TURSO_DATABASE_URL = "libsql://your-db.turso.io"
+TURSO_AUTH_TOKEN = "..."
+```
+
+and reboot the app. Without these variables the app quietly uses the local
+SQLite file instead — zero-config, just not shared across reboots.
